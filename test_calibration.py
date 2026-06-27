@@ -62,6 +62,58 @@ CASES = [
 ]
 
 
+def generate_audit_entries() -> None:
+    """
+    Drive the Flask app end-to-end to populate the audit log with 3 submissions
+    (one per confidence band) and 1 appeal, then print the resulting entries.
+
+    This produces structured audit-log evidence for the README. Each run appends
+    to audit_log.jsonl, so delete that file first if you want a clean set.
+    """
+    import app  # imported here so the calibration check can run without Flask
+
+    client = app.app.test_client()
+
+    # Three submissions chosen to land in different confidence bands.
+    submissions = [
+        ("creator-human", CASES[1][2]),  # casual review -> Human-Authored
+        ("creator-uncertain",
+         "Honestly, I think sustainable living is more achievable than people "
+         "assume. You dont have to overhaul everything at once. Small changes, "
+         "such as reducing single-use plastics, can collectively make a "
+         "meaningful difference over time."),  # lightly edited AI -> Uncertain
+        ("creator-ai", CASES[0][2]),     # polished paragraph -> AI-Generated
+    ]
+
+    print("\n" + "=" * 70)
+    print("AUDIT LOG: 3 submissions + 1 appeal")
+    print("=" * 70)
+
+    content_ids = []
+    for creator_id, text in submissions:
+        r = client.post("/submit", json={"text": text, "creator_id": creator_id}).get_json()
+        content_ids.append(r["content_id"])
+        print(f"submit  {creator_id:<18} conf={r['confidence']:<7} -> {r['label']['variant']}")
+
+    # File an appeal on the last submission (the clearly-AI one).
+    appealed_id = content_ids[-1]
+    ap = client.post("/appeal", json={
+        "content_id": appealed_id,
+        "creator_reasoning": "I wrote this for a class essay; the formal tone is intentional.",
+    }).get_json()
+    print(f"appeal  content_id={appealed_id[:8]}... -> {ap['status']}")
+
+    print("\n--- GET /log (newest first) ---")
+    for e in client.get("/log").get_json()["entries"]:
+        if e["type"] == "submission":
+            print(f"  [submission] {e['content_id'][:8]}.. ts={e['timestamp']} "
+                  f"attr='{e['attribution']}' conf={e['confidence']} "
+                  f"llm={e['llm_score']} stylo={e['stylometric_score']} appealed={e['appealed']}")
+        else:
+            print(f"  [appeal]     {e['content_id'][:8]}.. ts={e['timestamp']} "
+                  f"status={e['status']} reasoning='{e['appeal_reasoning'][:40]}...'")
+
+
 def main() -> None:
     header = f"{'case':<38}{'GROQ':>6}{'STYLO':>7}{'CONF':>7}   category"
     print(header)
@@ -77,6 +129,8 @@ def main() -> None:
         print(f"    expected: {expected}")
         print(f"    stylometric detail: {stylo['reasoning']}")
         print()
+
+    generate_audit_entries()
 
 
 if __name__ == "__main__":
