@@ -22,7 +22,9 @@ Test the Groq signal directly (see `__main__`) before wiring it into the
 """
 
 import os
+import re
 import json
+import statistics
 
 from dotenv import load_dotenv
 from groq import Groq
@@ -128,20 +130,180 @@ def groq_signal(text: str) -> dict:
 
 def stylometric_signal(text: str) -> dict:
     """
-    Signal 2 (M4 — STUB): Type-Token Ratio, sentence-length variance, and
-    punctuation density combined into a 0.0–1.0 score.
+    Signal 2: stylometric heuristics.
 
-    Returns the same dict shape as groq_signal(). For now it returns a neutral
-    placeholder so the pipeline contract is stable.
+    Computes three raw metrics and folds them into one 0.0–1.0 AI-likelihood
+    score (0.0 = human, 1.0 = AI), matching the groq_signal() dict shape:
+
+    1. Sentence-length burstiness — the coefficient of variation (std / mean)
+       of words-per-sentence. Humans write "bursty" prose (a mix of short and
+       long sentences -> HIGH variation); LLMs tend toward uniform sentence
+       lengths (LOW variation). So low burstiness pushes the score toward AI.
+       This is the strongest of the three (weight 0.5).
+
+    2. Type-Token Ratio (TTR) — unique words / total words. Restricted,
+       repetitive vocabulary (LOW TTR) leans AI; diverse vocabulary (HIGH TTR)
+       leans human. Length-sensitive, so it carries a smaller weight (0.2).
+
+    3. Punctuation density — punctuation marks / words. Dense, "proper"
+       comma/clause-heavy punctuation leans AI; sparse punctuation (casual
+       human writing) leans human (weight 0.3).
+
+    Each raw metric is linearly mapped onto a [0, 1] sub-score against
+    documented human/AI anchor points, then combined as a weighted average.
     """
-    # TODO (M4): compute TTR, sentence-length variance, punctuation density,
-    # and map them onto a 0.0–1.0 AI-likelihood score.
+    if not text or not text.strip():
+        return {
+            "signal": "stylometric",
+            "score": 0.5,
+            "reasoning": "No text provided.",
+            "metrics": {},
+            "error": "empty_input",
+        }
+
+    # ── raw metrics ──────────────────────────────────────────────────────────
+    words = re.findall(r"[A-Za-z']+", text.lower())
+    total_words = len(words)
+
+    if total_words == 0:
+        return {
+            "signal": "stylometric",
+            "score": 0.5,
+            "reasoning": "No word tokens found.",
+            "metrics": {},
+            "error": "no_words",
+        }
+
+    # 1. Type-Token Ratio
+    ttr = len(set(words)) / total_words
+
+    # 2. Sentence-length burstiness (coefficient of variation)
+    sentences = [s for s in re.split(r"[.!?]+", text) if s.strip()]
+    sent_word_counts = [len(re.findall(r"[A-Za-z']+", s)) for s in sentences]
+    sent_word_counts = [c for c in sent_word_counts if c > 0]
+
+    if len(sent_word_counts) >= 3:
+        mean_len = statistics.mean(sent_word_counts)
+        sent_cv = statistics.pstdev(sent_word_counts) / mean_len if mean_len else 0.0
+    else:
+        # Variance over 1–2 sentences is statistically meaningless — treat as
+        # neutral rather than letting a coincidence dominate the score.
+        sent_cv = None
+
+    # 3. Punctuation density
+    punct_count = len(re.findall(r"[,.;:!?\-—()\"']", text))
+    punct_density = punct_count / total_words
+
+    # ── map each raw metric onto a 0–1 AI-likelihood sub-score ────────────────
+    # Burstiness: CV >= 0.6 -> human (0.0); CV == 0 -> AI (1.0).
+    if sent_cv is None:
+        burst_sub = 0.5  # neutral when we can't measure it
+    else:
+        burst_sub = _scale(sent_cv, human_at=0.6, ai_at=0.0)
+
+    # TTR: >= 0.75 -> human (0.0); <= 0.4 -> AI (1.0).
+    ttr_sub = _scale(ttr, human_at=0.75, ai_at=0.4)
+
+    # Punctuation density: <= 0.08 -> human (0.0); >= 0.28 -> AI (1.0).
+    # (Anchors kept loose so ordinary comma-rich prose doesn't max out.)
+    punct_sub = _scale(punct_density, human_at=0.08, ai_at=0.28)
+
+    # ── weighted combination ─────────────────────────────────────────────────
+    score = (0.5 * burst_sub) + (0.2 * ttr_sub) + (0.3 * punct_sub)
+    score = max(0.0, min(1.0, score))
+
+    reasoning = (
+        f"burstiness(cv={_fmt(sent_cv)})->{burst_sub:.2f}, "
+        f"ttr={ttr:.2f}->{ttr_sub:.2f}, "
+        f"punct_density={punct_density:.2f}->{punct_sub:.2f}"
+    )
+
     return {
         "signal": "stylometric",
-        "score": 0.5,
-        "reasoning": "Stylometric signal not yet implemented (M4).",
-        "error": "not_implemented",
+        "score": round(score, 4),
+        "reasoning": reasoning,
+        "metrics": {
+            "type_token_ratio": round(ttr, 4),
+            "sentence_length_cv": (round(sent_cv, 4) if sent_cv is not None else None),
+            "punctuation_density": round(punct_density, 4),
+            "num_sentences": len(sent_word_counts),
+            "num_words": total_words,
+        },
+        "error": None,
     }
+
+
+# ── confidence scoring (signal combination) ─────────────────────────────────
+
+# Weights for the two signals. Groq carries the large majority of the weight
+# because it reads semantics directly and detects fluent AI reliably; the
+# stylometric signal is noisy and under-detects fluent AI (it scored all four
+# calibration inputs low — see README), so it acts only as a minor corroborator
+# that nudges, never vetoes, the LLM's judgment.
+WEIGHT_GROQ = 0.80
+WEIGHT_STYLOMETRIC = 0.20
+
+
+def combine_signals(groq_result: dict, stylometric_result: dict,
+                    w_groq: float = WEIGHT_GROQ,
+                    w_stylo: float = WEIGHT_STYLOMETRIC) -> dict:
+    """
+    Combine the two signal scores into a single confidence score as a weighted
+    mean:
+
+        combined = (w_groq * groq_score) + (w_stylo * stylometric_score)
+
+    The result is clamped to [0.0, 1.0], where 0.0 = confidently human and
+    1.0 = confidently AI.
+
+    Why a plain weighted mean (and not the earlier disagreement-penalty
+    formula): calibration testing showed the subtractive penalty dragged
+    confident, correct AI detections down into the "human" band whenever the
+    weak stylometric signal disagreed — a confidently-wrong failure. Trusting
+    the stronger signal via weighting fixes this. Uncertainty is still
+    represented through the 0.4–0.7 "uncertain" label band.
+
+    `disagreement` is reported for transparency/audit but no longer alters the
+    score. A signal that errored contributes its neutral 0.5 fallback (set
+    upstream), so the combination degrades gracefully rather than crashing.
+
+    Returns a breakdown dict so the audit log can record *how* the score was
+    reached, not just the final number.
+    """
+    g = groq_result.get("score", 0.5)
+    s = stylometric_result.get("score", 0.5)
+
+    weighted_mean = (w_groq * g) + (w_stylo * s)
+    disagreement = abs(g - s)
+    combined = max(0.0, min(1.0, weighted_mean))
+
+    return {
+        "combined_score": round(combined, 4),
+        "weighted_mean": round(weighted_mean, 4),
+        "disagreement": round(disagreement, 4),
+        "groq_score": g,
+        "stylometric_score": s,
+        "weights": {"groq": w_groq, "stylometric": w_stylo},
+    }
+
+
+def _scale(value: float, human_at: float, ai_at: float) -> float:
+    """
+    Linearly map a raw metric to a [0, 1] AI-likelihood sub-score, clamped.
+
+    Returns 0.0 when value == human_at and 1.0 when value == ai_at, interpolating
+    linearly in between. Works in either direction (human_at may be greater or
+    less than ai_at).
+    """
+    if ai_at == human_at:
+        return 0.5
+    frac = (value - human_at) / (ai_at - human_at)
+    return max(0.0, min(1.0, frac))
+
+
+def _fmt(value) -> str:
+    """Format an optional float for the reasoning string."""
+    return f"{value:.2f}" if value is not None else "n/a"
 
 
 # ── direct test harness ─────────────────────────────────────────────────────
@@ -164,9 +326,31 @@ if __name__ == "__main__":
         "Empty input": "",
     }
 
+    # Extra samples for the stylometric signal, including planning.md edge cases.
+    stylometric_samples = dict(samples)
+    stylometric_samples["Repetitive poem (edge case)"] = (
+        "I run. I run fast. I run far. I run all day. "
+        "I run alone. I run again. I run and run and run."
+    )
+    stylometric_samples["Technical docs (edge case)"] = (
+        "The function accepts a string. The function returns a value. "
+        "The function raises an error on invalid input. The function logs "
+        "each call. The function is thread-safe."
+    )
+
+    print("########## SIGNAL 1: groq_signal ##########")
     for label, text in samples.items():
         result = groq_signal(text)
         print(f"\n=== {label} ===")
         print(f"  score:     {result['score']}")
+        print(f"  reasoning: {result['reasoning']}")
+        print(f"  error:     {result['error']}")
+
+    print("\n\n########## SIGNAL 2: stylometric_signal ##########")
+    for label, text in stylometric_samples.items():
+        result = stylometric_signal(text)
+        print(f"\n=== {label} ===")
+        print(f"  score:     {result['score']}")
+        print(f"  metrics:   {result.get('metrics')}")
         print(f"  reasoning: {result['reasoning']}")
         print(f"  error:     {result['error']}")

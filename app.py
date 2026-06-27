@@ -33,7 +33,7 @@ from flask import Flask, request, jsonify
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 
-from signals import groq_signal, stylometric_signal
+from signals import groq_signal, stylometric_signal, combine_signals
 
 app = Flask(__name__)
 
@@ -45,17 +45,16 @@ def _utc_timestamp() -> str:
 
 def _attribution_from_score(score: float) -> str:
     """
-    Map a 0.0–1.0 AI-likelihood score (0.0 = human, 1.0 = AI) to a provisional
-    attribution label, using the thresholds from planning.md's label table.
+    Map a 0.0–1.0 confidence score (0.0 = human, 1.0 = AI) to its attribution
+    label, using the thresholds from planning.md's transparency-label table.
 
-    M3 note: this runs on Signal 1 alone. In M4 it will run on the combined
-    confidence score instead.
+    Runs on the combined confidence score produced by combine_signals().
     """
     if score < 0.4:
-        return "likely_human"
+        return "Human-Authored Content"
     if score < 0.7:
-        return "uncertain"
-    return "likely_ai"
+        return "Attribution Uncertain"
+    return "AI-Generated Content"
 
 # ── Rate limiting ────────────────────────────────────────────────────────────
 # Keyed by client IP. Defaults are documented in the README; per-route limits
@@ -130,15 +129,17 @@ def submit():
     # Signal 2 (M4): Stylometric heuristics — currently a neutral stub.
     stylometric_result = stylometric_signal(text)
 
-    llm_score = groq_result["score"]
+    llm_score = groq_result["score"]               # Signal 1 (Groq)
+    stylometric_score = stylometric_result["score"]  # Signal 2 (stylometric)
 
-    # ── Confidence scoring (M4 — STUB) ───────────────────────────────────────
-    # TODO (M4): combine Score 1 and Score 2 per planning.md:
+    # ── Confidence scoring ───────────────────────────────────────────────────
+    # Combine Score 1 and Score 2 per planning.md's Detection Signals section:
     #   weighted_mean - (0.5 * abs(groq_score - stylometric_score))
-    confidence = None
+    combination = combine_signals(groq_result, stylometric_result)
+    confidence = combination["combined_score"]
 
-    # Provisional attribution from Signal 1 alone (M4 recomputes from confidence).
-    attribution = _attribution_from_score(llm_score)
+    # Attribution category derived from the combined confidence score.
+    attribution = _attribution_from_score(confidence)
 
     # ── Transparency label (M5 — STUB) ───────────────────────────────────────
     # TODO (M5): map the confidence score to one of three label variants.
@@ -153,15 +154,17 @@ def submit():
         "creator_id": creator_id,
         "timestamp": _utc_timestamp(),
         "attribution": attribution,
-        "confidence": confidence,   # filled in M4
-        "llm_score": llm_score,     # Signal 1 (Groq)
-        "label": label,             # filled in M5
+        "confidence": confidence,                 # combined confidence score
+        "llm_score": llm_score,                   # Signal 1 (Groq)
+        "stylometric_score": stylometric_score,   # Signal 2 (stylometric)
+        "label": label,                           # filled in M5
         "status": "classified",
         "text": text,               # retained for the M5 appeal review view
         "signals": {
             "groq": groq_result,
             "stylometric": stylometric_result,
         },
+        "combination": combination,  # how the confidence score was reached
     }
     _log_decision(entry)
 
@@ -173,12 +176,14 @@ def submit():
         "attribution": attribution,
         "confidence": confidence,
         "llm_score": llm_score,
+        "stylometric_score": stylometric_score,
         "label": label,
         "status": "classified",
         "signals": {
             "groq": groq_result,
             "stylometric": stylometric_result,
         },
+        "combination": combination,
     }), 200
 
 
