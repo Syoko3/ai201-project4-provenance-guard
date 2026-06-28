@@ -21,7 +21,7 @@ When the user submits the content, the raw text and creator_id arrive at POST /s
 
 ## Confidence Scoring
 
-I combined the signals into a confidence score by defining the weights of each signal, calculating the weighted mean, and finding the absolute difference between the signals. The weight of Groq is 0.8 and the weight of Stylometric Heuristics is 0.2. The reasoning of these weights was that Groq reads meaning directly and reliably detects fluent AI, while the stylometric signal under-detects it, which shows that Groq is the primary voice and stylometry is a minor corroborator that nudges the score without being able to override it. The final confidence score was the absolute difference between the signals times 0.5 subtracted from the calculated weighted mean (Weighted_Mean - (0.5 * (abs(Groq_Score - Stylometric_Score)))). If the signals disagreed significantly (|P-S| > 0.3), then the final score was put toward 0.5.
+I combined the signals into a confidence score by defining the weights of each signal and calculating the weighted mean of both signals. The weight of Groq is 0.8 and the weight of Stylometric Heuristics is 0.2. The reasoning of these weights was that Groq reads meaning directly and reliably detects fluent AI, while the stylometric signal under-detects it, which shows that Groq is the primary voice and stylometry is a minor corroborator that nudges the score without being able to override it. The final confidence score was the plain weighted mean (0.8 * Groq_Score + 0.2 * Stylometric_Score).
 
 Example 1: High-Confidence Score
 
@@ -113,10 +113,10 @@ Clearly human-written                   0.21 0.0164 0.1713   Human-Authored Cont
 ## Spec Reflection
 
 **One way the spec helped you during implementation:**
-The architecture diagram helped me during implementation to 
+The architecture diagram helped me during implementation by implementing the Rate Limiter, which had to be before the detection pipeline. It also helped the implementation of both submission and appeal flow to ensure having the correct flow and correct response to return to the user.
 
 **One way your implementation diverged from the spec, and why:**
-My implementation diverged from the spec by 
+My implementation diverged from the spec by calculating the combined confidence score. On the spec, I said that I will use the absolute difference, but on the implementation, I changed to the plain weighted mean to calculate the confidence score because calibration testing exposed a critical flaw in the spec's formula. The subtractive penalty pushes the score downward (toward "human") whenever the signals disagree, but since my stylometric signal under-detects fluent AI, it disagrees with Groq on exactly the AI text that matters.
 
 ---
 
@@ -126,10 +126,10 @@ My implementation diverged from the spec by
 
 - *What I gave the AI:* I gave Claude my detection signals section and the submission flow of my architecture section, and ask it to generate the functions of two signals, combined confidence scoring logic, and the Flask app skeleton.
 - *What it produced:* It implemented the signals.py for the functions of two signals and combined confidence scoring logic using these two signal scores. It also produced the app.py for the Flask app skeleton and the submission flow logic for POST /submit.
-- *What I changed or overrode:* 
+- *What I changed or overrode:* I changed the confidence scoring logic to the plain weighted mean with 0.8 weight for Groq and 0.2 weight for Stylometric. I also added the test_calibration.py to test the scores with four inputs.
 
 **Instance 2**
 
 - *What I gave the AI:* I gave Claude my transparency label design section, the appeals workflow section, and the appeals flow of my architecture section, and ask it to generate the label generation logic and the /appeal endpoint.
 - *What it produced:* It produced the functions for the attribution from the score, audit log implementation with status changes for the appeal, and the appeals flow logic for POST /appeal.
-- *What I changed or overrode:* 
+- *What I changed or overrode:* I changed the exact display text correctly to my spec and verified the workflow of the POST /appeal part and the audit log information by generating and testing a total of 4 entries in test_calibration.py.
