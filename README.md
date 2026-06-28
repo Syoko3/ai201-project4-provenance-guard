@@ -21,7 +21,7 @@ When the user submits the content, the raw text and creator_id arrive at POST /s
 
 ## Confidence Scoring
 
-I combined the signals into a confidence score by defining the weights of each signal and calculating the weighted mean of both signals. The weight of Groq is 0.8 and the weight of Stylometric Heuristics is 0.2. The reasoning of these weights was that Groq reads meaning directly and reliably detects fluent AI, while the stylometric signal under-detects it, which shows that Groq is the primary voice and stylometry is a minor corroborator that nudges the score without being able to override it. The final confidence score was the plain weighted mean (0.8 * Groq_Score + 0.2 * Stylometric_Score).
+I combined the signals into a confidence score by defining the weights of each signal and calculating the weighted mean of both signals. The weight of Groq is 0.8 and the weight of Stylometric Heuristics is 0.2. The reasoning of these weights was that Groq reads meaning directly and reliably detects fluent AI, while the stylometric signal under-detects it, which shows that Groq is the primary voice and stylometry is a minor corroborator that nudges the score without being able to override it. The final confidence score was the plain weighted mean (0.8 * Groq_Score + 0.2 * Stylometric_Score). I validated that this is meaningful by catching the real miscalibration in the test_calibration.py. The system scored the clearly-AI paragraph 0.34, and classified as "Human-Authored", which was confidently wrong, so I corrected the formula to a weighted mean (which has the score of the clearly-AI paragraph of 0.78).
 
 Example 1: High-Confidence Score
 
