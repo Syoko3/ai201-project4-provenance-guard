@@ -1,6 +1,6 @@
 # ai201-project4-provenance-guard
 
-Short Portfolio Walkthrough Video Link: 
+Short Portfolio Walkthrough Video Link: https://drive.google.com/file/d/1dxRGfqANu3MoNozHcmCyY2D-nTpWq0NA/view?usp=sharing
 
 ---
 
